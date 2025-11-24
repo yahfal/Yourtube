@@ -17,7 +17,10 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, Text, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import sessionmaker, declarative_base, relationship, Session
-from passlib.hash import bcrypt
+
+# ⬇️ ЗАМЕНА bcrypt -> argon2
+from passlib.hash import argon2
+
 import jwt
 import cloudinary
 import cloudinary.uploader
@@ -34,7 +37,10 @@ MEDIA_DIR = BASE_DIR / ".." / "media"
 MEDIA_DIR.mkdir(exist_ok=True, parents=True)
 
 # DB setup
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {})
+engine = create_engine(
+    DATABASE_URL,
+    connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {}
+)
 SessionLocal = sessionmaker(bind=engine)
 Base = declarative_base()
 
@@ -101,11 +107,12 @@ def get_db():
     finally:
         db.close()
 
+# ⬇️ ИСПРАВЛЕННЫЕ ФУНКЦИИ ПАРОЛЕЙ
 def hash_password(pw: str) -> str:
-    return bcrypt.hash(pw)
+    return argon2.hash(pw)
 
 def verify_password(pw: str, h: str) -> bool:
-    return bcrypt.verify(pw, h)
+    return argon2.verify(pw, h)
 
 def create_token(user_id: int):
     payload = {"user_id": user_id, "exp": datetime.utcnow() + timedelta(days=7)}
@@ -252,7 +259,9 @@ def react_api(request: Request, target_type: str = Form(...), target_id: int = F
         if v:
             likes = db.query(Reaction).filter(Reaction.target_type=="video", Reaction.target_id==v.id, Reaction.value==1).count()
             dislikes = db.query(Reaction).filter(Reaction.target_type=="video", Reaction.target_id==v.id, Reaction.value==-1).count()
-            v.likes = likes; v.dislikes = dislikes; db.commit()
+            v.likes = likes
+            v.dislikes = dislikes
+            db.commit()
     return {"status":"ok"}
 
 @app.get("/profile/{username}", response_class=HTMLResponse)
