@@ -1,7 +1,7 @@
 """
 MiniTube - FastAPI + PostgreSQL + Cloudinary
 Environment variables required:
-- DATABASE_URL (Postgres connection string)
+- DATABASE_URL (Postgres connection string) [optional for quick test: uses sqlite if absent]
 - SECRET_KEY (JWT secret)
 - CLOUDINARY_URL (cloudinary://API_KEY:API_SECRET@CLOUD_NAME)
 """
@@ -10,6 +10,7 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Optional
 from pathlib import Path
+from urllib.parse import urlparse, unquote
 
 from fastapi import FastAPI, Request, Form, UploadFile, File, Depends, HTTPException, status
 from fastapi.responses import RedirectResponse, HTMLResponse
@@ -18,25 +19,53 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, Text, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import sessionmaker, declarative_base, relationship, Session
 
-# use pbkdf2_sha256 from passlib (pure-python backend, no extra system deps)
+# password helper (pure-python backend, no extra native deps)
 from passlib.hash import pbkdf2_sha256
 
 import jwt
 import cloudinary
 import cloudinary.uploader
 
-# Config
+# ------------------ Config & Cloudinary init ------------------
 DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///./dev.db")
 SECRET_KEY = os.environ.get("SECRET_KEY", "change-me")
 CLOUDINARY_URL = os.environ.get("CLOUDINARY_URL")
-if CLOUDINARY_URL:
-    cloudinary.config(cloudinary_url=CLOUDINARY_URL)
 
+def init_cloudinary_from_url(url: Optional[str]) -> bool:
+    """
+    Parse CLOUDINARY_URL like: cloudinary://API_KEY:API_SECRET@CLOUD_NAME
+    and configure cloudinary library. Returns True on success.
+    """
+    if not url:
+        return False
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme != "cloudinary":
+            return False
+        api_key = parsed.username
+        api_secret = parsed.password
+        cloud_name = parsed.hostname
+        if api_key:
+            api_key = unquote(api_key)
+        if api_secret:
+            api_secret = unquote(api_secret)
+        if not (api_key and api_secret and cloud_name):
+            return False
+        cloudinary.config(cloud_name=cloud_name, api_key=api_key, api_secret=api_secret, secure=True)
+        return True
+    except Exception:
+        return False
+
+CLOUDINARY_OK = init_cloudinary_from_url(CLOUDINARY_URL)
+if not CLOUDINARY_OK:
+    print("Warning: Cloudinary not configured or CLOUDINARY_URL invalid. Uploads will fail until corrected.")
+
+# ------------------ Paths ------------------
 BASE_DIR = Path(__file__).resolve().parent
 MEDIA_DIR = BASE_DIR / ".." / "media"
 MEDIA_DIR.mkdir(exist_ok=True, parents=True)
 
-# DB setup
+# ------------------ DB setup ------------------
 engine = create_engine(
     DATABASE_URL,
     connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {}
@@ -44,7 +73,7 @@ engine = create_engine(
 SessionLocal = sessionmaker(bind=engine)
 Base = declarative_base()
 
-# Models
+# ------------------ Models ------------------
 class User(Base):
     __tablename__ = "users"
     id = Column(Integer, primary_key=True)
@@ -94,12 +123,12 @@ class Reaction(Base):
 
 Base.metadata.create_all(bind=engine)
 
-# FastAPI app
+# ------------------ FastAPI app ------------------
 app = FastAPI(title="MiniTube (Render)")
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
-# Helpers
+# ------------------ Helpers ------------------
 def get_db():
     db = SessionLocal()
     try:
@@ -107,9 +136,8 @@ def get_db():
     finally:
         db.close()
 
-# password helpers (pbkdf2_sha256)
+# password helpers
 def hash_password(pw: str) -> str:
-    # pbkdf2_sha256 automatically salts; rounds default is secure for demo
     return pbkdf2_sha256.hash(pw)
 
 def verify_password(pw: str, h: str) -> bool:
@@ -135,7 +163,7 @@ def current_user(request: Request, db: Session = Depends(get_db)) -> Optional[Us
     user = db.query(User).filter(User.id == data.get("user_id")).first()
     return user
 
-# Routes
+# ------------------ Routes ------------------
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request, db: Session = Depends(get_db)):
     videos = db.query(Video).order_by(Video.created_at.desc()).limit(30).all()
@@ -187,12 +215,20 @@ def upload_page(request: Request, db: Session = Depends(get_db)):
 
 @app.post("/upload")
 def upload_video(request: Request, title: str = Form(...), description: str = Form(""), file: UploadFile = File(...), db: Session = Depends(get_db)):
-    if not CLOUDINARY_URL:
-        raise HTTPException(500, "CLOUDINARY_URL not configured")
+    # require cloudinary to be properly configured
+    if not CLOUDINARY_OK:
+        raise HTTPException(500, "Cloudinary is not configured correctly. Set CLOUDINARY_URL to 'cloudinary://API_KEY:API_SECRET@CLOUD_NAME'.")
+    # save temporarily
     tmp_name = f"/tmp/{uuid.uuid4().hex}_{file.filename}"
     with open(tmp_name, "wb") as f:
         f.write(file.file.read())
-    res = cloudinary.uploader.upload(tmp_name, resource_type="video", folder="minitube_videos")
+    # upload to cloudinary as video
+    try:
+        res = cloudinary.uploader.upload(tmp_name, resource_type="video", folder="minitube_videos")
+    except Exception as e:
+        # attach minimal info to logs and return user-friendly error
+        print("Cloudinary upload error:", str(e))
+        raise HTTPException(500, "Video upload failed (Cloudinary). Check logs.")
     public_id = res.get("public_id")
     url = res.get("secure_url")
     token = request.cookies.get("access_token")
@@ -218,9 +254,12 @@ def watch_video(request: Request, video_id: int, db: Session = Depends(get_db)):
     video.views += 1
     db.commit()
     thumb_url = None
-    if video.cloudinary_public_id and CLOUDINARY_URL:
+    if video.cloudinary_public_id and CLOUDINARY_OK:
         from cloudinary.utils import cloudinary_url
-        thumb_url, _ = cloudinary_url(video.cloudinary_public_id, resource_type="video", format="jpg", transformation=[{"start_offset":"0","width":480,"height":360,"crop":"fill"}])
+        try:
+            thumb_url, _ = cloudinary_url(video.cloudinary_public_id, resource_type="video", format="jpg", transformation=[{"start_offset":"0","width":480,"height":360,"crop":"fill"}])
+        except Exception:
+            thumb_url = None
     comments = db.query(Comment).filter(Comment.video_id == video.id).order_by(Comment.created_at.asc()).all()
     return templates.TemplateResponse("watch.html", {"request": request, "video": video, "thumb_url": thumb_url, "comments": comments, "user": current_user(request, db)})
 
@@ -242,7 +281,7 @@ def search(request: Request, q: Optional[str] = None, db: Session = Depends(get_
         videos = db.query(Video).filter((Video.title.ilike(pattern)) | (Video.description.ilike(pattern))).limit(50).all()
     return templates.TemplateResponse("search.html", {"request": request, "videos": videos, "q": q, "user": current_user(request, db)})
 
-@app.post("/api.react")
+@app.post("/api/react")
 def react_api(request: Request, target_type: str = Form(...), target_id: int = Form(...), value: int = Form(...), db: Session = Depends(get_db)):
     user = current_user(request, db)
     if not user:
