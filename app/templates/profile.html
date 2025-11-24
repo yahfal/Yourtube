@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block content %}
+<h3>Profile: {{ profile.username }}</h3>
+<p>Email: {{ profile.email }}</p>
+<hr/>
+<h5>Videos</h5>
+<div class="row">
+  {% for v in videos %}
+  <div class="col-md-4">
+    <div class="card mb-2">
+      <img src="{{ v.cloudinary_url }}" class="card-img-top" />
+      <div class="card-body">
+        <h6>{{ v.title }}</h6>
+        <a href="/watch/{{ v.id }}" class="btn btn-sm btn-primary">Watch</a>
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endblock %}

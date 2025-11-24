@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block content %}
+<h3>Search results for "{{ q }}"</h3>
+<div class="row">
+  {% for v in videos %}
+  <div class="col-md-4 mb-3">
+    <div class="card">
+      <img src="{{ v.cloudinary_url }}" class="card-img-top" />
+      <div class="card-body">
+        <h5 class="card-title">{{ v.title }}</h5>
+        <a href="/watch/{{ v.id }}" class="btn btn-sm btn-primary">Watch</a>
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endblock %}

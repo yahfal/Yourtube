@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block content %}
+<h3>Latest videos</h3>
+<div class="row">
+  {% for v in videos %}
+  <div class="col-md-4 mb-3">
+    <div class="card">
+      <img src="{{ v.cloudinary_url }}" class="card-img-top" />
+      <div class="card-body">
+        <h5 class="card-title">{{ v.title or "(no title)" }}</h5>
+        <p class="card-text">{{ v.description[:120] }}</p>
+        <p class="mb-1"><small>By {{ v.uploader.username }}</small></p>
+        <a class="btn btn-sm btn-primary" href="/watch/{{ v.id }}">Watch</a>
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endblock %}

@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block content %}
+<h3>Upload video</h3>
+<form method="post" enctype="multipart/form-data">
+  <div class="mb-3"><input class="form-control" name="title" placeholder="Title" required></div>
+  <div class="mb-3"><textarea class="form-control" name="description" placeholder="Description"></textarea></div>
+  <div class="mb-3"><input class="form-control" name="file" type="file" accept="video/*" required></div>
+  <button class="btn btn-success">Upload</button>
+</form>
+{% endblock %}
