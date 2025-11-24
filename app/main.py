@@ -18,8 +18,8 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, Text, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import sessionmaker, declarative_base, relationship, Session
 
-# ⬇️ ЗАМЕНА bcrypt -> argon2
-from passlib.hash import argon2
+# use pbkdf2_sha256 from passlib (pure-python backend, no extra system deps)
+from passlib.hash import pbkdf2_sha256
 
 import jwt
 import cloudinary
@@ -50,7 +50,7 @@ class User(Base):
     id = Column(Integer, primary_key=True)
     email = Column(String(256), unique=True, index=True, nullable=False)
     username = Column(String(64), unique=True, index=True, nullable=False)
-    password_hash = Column(String(256), nullable=False)
+    password_hash = Column(String(512), nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     videos = relationship("Video", back_populates="uploader")
     comments = relationship("Comment", back_populates="user")
@@ -107,12 +107,13 @@ def get_db():
     finally:
         db.close()
 
-# ⬇️ ИСПРАВЛЕННЫЕ ФУНКЦИИ ПАРОЛЕЙ
+# password helpers (pbkdf2_sha256)
 def hash_password(pw: str) -> str:
-    return argon2.hash(pw)
+    # pbkdf2_sha256 automatically salts; rounds default is secure for demo
+    return pbkdf2_sha256.hash(pw)
 
 def verify_password(pw: str, h: str) -> bool:
-    return argon2.verify(pw, h)
+    return pbkdf2_sha256.verify(pw, h)
 
 def create_token(user_id: int):
     payload = {"user_id": user_id, "exp": datetime.utcnow() + timedelta(days=7)}
@@ -241,7 +242,7 @@ def search(request: Request, q: Optional[str] = None, db: Session = Depends(get_
         videos = db.query(Video).filter((Video.title.ilike(pattern)) | (Video.description.ilike(pattern))).limit(50).all()
     return templates.TemplateResponse("search.html", {"request": request, "videos": videos, "q": q, "user": current_user(request, db)})
 
-@app.post("/api/react")
+@app.post("/api.react")
 def react_api(request: Request, target_type: str = Form(...), target_id: int = Form(...), value: int = Form(...), db: Session = Depends(get_db)):
     user = current_user(request, db)
     if not user:
