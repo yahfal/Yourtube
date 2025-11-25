@@ -1,37 +1,70 @@
-<!DOCTYPE html>
-<html lang="en">
+<!doctype html>
+<html>
 <head>
-  <meta charset="UTF-8" />
+  <meta charset="utf-8">
   <title>YourTube — Главная</title>
-  <link rel="stylesheet" href="{{ url_for('static', path='/styles.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', path='styles.css') }}">
 </head>
 <body>
   <header>
     <h1><a href="/">YourTube</a></h1>
     {% if user %}
-      <a href="/profile/{{ user.username }}">Профиль</a> | <a href="/logout">Выйти</a>
+      Привет, <a href="/profile/{{ user.username }}">{{ user.username }}</a> | <a href="/logout">Выйти</a>
     {% else %}
       <a href="/login">Войти</a> | <a href="/register">Регистрация</a>
     {% endif %}
-    <a href="/upload">Загрузить видео</a>
+    <a href="/upload">Загрузить</a>
   </header>
 
   <main>
     <h2>Рекомендовано</h2>
-    <div class="video-grid">
-      {% for video in videos %}
-        <div class="video-card">
-          {% if video.cloudinary_public_id %}
-            <a href="/watch/{{ video.id }}">
-              <img src="{{ url_for('static', path='/placeholder.jpg') }}" alt="превью" class="thumb" />
-              {# Можно заменить на Cloudinary-превью, если передаёшь thumb_url #}
-            </a>
-          {% endif %}
-          <h3><a href="/watch/{{ video.id }}">{{ video.title }}</a></h3>
-          <p>Просмотры: {{ video.views }}</p>
+    <div class="grid">
+      {% for v in videos %}
+        <div class="card">
+          <a href="/watch/{{ v.id }}">
+            <img src="{{ v.thumb_url }}" alt="thumb" class="thumb">
+          </a>
+          <div class="meta">
+            <a href="/watch/{{ v.id }}"><strong>{{ v.title }}</strong></a>
+            <div class="stats">{{ v.uploader }} • {{ v.views }} просмотров</div>
+            <div class="reactions">
+              <button class="like-btn" data-id="{{ v.id }}" data-value="1">👍 <span class="count">{{ v.likes }}</span></button>
+              <button class="dislike-btn" data-id="{{ v.id }}" data-value="-1">👎 <span class="count">{{ v.dislikes }}</span></button>
+            </div>
+          </div>
         </div>
       {% endfor %}
     </div>
   </main>
+
+  <script>
+    async function react(id, value) {
+      const form = new FormData();
+      form.append('target_type','video');
+      form.append('target_id', id);
+      form.append('value', value);
+      const resp = await fetch('/api/react', { method: 'POST', body: form });
+      if (!resp.ok) return;
+      const json = await resp.json();
+      return json;
+    }
+
+    document.addEventListener('click', async (e) => {
+      if (e.target.closest('.like-btn') || e.target.closest('.dislike-btn')) {
+        const btn = e.target.closest('button');
+        const id = btn.getAttribute('data-id');
+        const value = parseInt(btn.getAttribute('data-value'));
+        const res = await react(id, value);
+        if (res && res.likes !== undefined) {
+          // update counts beside this card
+          const card = btn.closest('.card');
+          if (card) {
+            card.querySelector('.like-btn .count').textContent = res.likes;
+            card.querySelector('.dislike-btn .count').textContent = res.dislikes;
+          }
+        }
+      }
+    });
+  </script>
 </body>
 </html>
