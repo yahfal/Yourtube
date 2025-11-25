@@ -32,10 +32,6 @@ SECRET_KEY = os.environ.get("SECRET_KEY", "change-me")
 CLOUDINARY_URL = os.environ.get("CLOUDINARY_URL")
 
 def init_cloudinary_from_url(url: Optional[str]) -> bool:
-    """
-    Parse CLOUDINARY_URL like: cloudinary://API_KEY:API_SECRET@CLOUD_NAME
-    and configure cloudinary library. Returns True on success.
-    """
     if not url:
         return False
     try:
@@ -69,16 +65,20 @@ MEDIA_DIR.mkdir(exist_ok=True, parents=True)
 # Prefer psycopg v3 (psycopg) on modern Python; if installed, adjust URL scheme for SQLAlchemy.
 USE_PSYCOPG3 = False
 try:
-    import psycopg  # psycopg v3
+    import psycopg  # noqa: F401
     USE_PSYCOPG3 = True
 except Exception:
     USE_PSYCOPG3 = False
 
 _engine_url = DATABASE_URL or "sqlite:///./dev.db"
 
-# If psycopg v3 present and URL starts with postgres://, replace scheme so SQLAlchemy uses psycopg driver
-if USE_PSYCOPG3 and _engine_url.startswith("postgres://"):
-    _engine_url = _engine_url.replace("postgres://", "postgresql+psycopg://", 1)
+# If psycopg v3 present, ensure SQLAlchemy URL uses the psycopg driver.
+if USE_PSYCOPG3:
+    # support both postgres:// and postgresql:// forms
+    if _engine_url.startswith("postgres://"):
+        _engine_url = _engine_url.replace("postgres://", "postgresql+psycopg://", 1)
+    elif _engine_url.startswith("postgresql://") and "+psycopg" not in _engine_url:
+        _engine_url = _engine_url.replace("postgresql://", "postgresql+psycopg://", 1)
 
 connect_args = {"check_same_thread": False} if _engine_url.startswith("sqlite") else {}
 
@@ -102,8 +102,8 @@ class Video(Base):
     id = Column(Integer, primary_key=True)
     title = Column(String(256))
     description = Column(Text)
-    cloudinary_public_id = Column(String(512), nullable=False)
-    cloudinary_url = Column(String(1024), nullable=False)
+    cloudinary_public_id = Column(String(512), nullable=True)
+    cloudinary_url = Column(String(1024), nullable=True)
     uploader_id = Column(Integer, ForeignKey("users.id"))
     created_at = Column(DateTime, default=datetime.utcnow)
     likes = Column(Integer, default=0)
@@ -195,17 +195,17 @@ def make_thumb(public_id: str, width: int = 480, height: int = 360) -> Optional[
 # ------------------ Routes ------------------
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request, db: Session = Depends(get_db)):
-    # show recommended by views desc first, but also include recent
     videos = db.query(Video).order_by(Video.views.desc(), Video.created_at.desc()).limit(30).all()
-    # add thumb_url for rendering
     video_list = []
     for v in videos:
         video_list.append({
             "id": v.id,
-            "title": v.title,
-            "views": v.views,
-            "thumb_url": make_thumb(v.cloudinary_public_id, width=320, height=180) or v.cloudinary_url,
-            "uploader": v.uploader.username if v.uploader else None,
+            "title": v.title or "Untitled",
+            "views": v.views or 0,
+            "likes": v.likes or 0,
+            "dislikes": v.dislikes or 0,
+            "uploader": v.uploader.username if v.uploader else "unknown",
+            "thumb_url": make_thumb(v.cloudinary_public_id, width=320, height=180) or v.cloudinary_url or "/static/placeholder.jpg",
         })
     return templates.TemplateResponse("index.html", {"request": request, "videos": video_list, "user": current_user(request, db)})
 
@@ -255,31 +255,23 @@ def upload_page(request: Request, db: Session = Depends(get_db)):
 
 @app.post("/upload")
 def upload_video(request: Request, title: str = Form(...), description: str = Form(""), file: UploadFile = File(...), db: Session = Depends(get_db)):
-    # require cloudinary to be properly configured
     if not CLOUDINARY_OK:
-        raise HTTPException(500, "Cloudinary is not configured correctly. Set CLOUDINARY_URL to 'cloudinary://API_KEY:API_SECRET@CLOUD_NAME'.")
-    # save temporarily
+        raise HTTPException(500, "Cloudinary is not configured correctly. Set CLOUDINARY_URL environment variable.")
     tmp_name = f"/tmp/{uuid.uuid4().hex}_{os.path.basename(file.filename)}"
     try:
         with open(tmp_name, "wb") as f:
             f.write(file.file.read())
     except Exception as e:
         raise HTTPException(500, f"Failed to save upload: {e}")
-    # upload to cloudinary as video
     try:
         res = cloudinary.uploader.upload(tmp_name, resource_type="video", folder="minitube_videos")
     except Exception as e:
-        # attach minimal info to logs and return user-friendly error
         print("Cloudinary upload error:", str(e))
         try:
             os.remove(tmp_name)
         except Exception:
             pass
         raise HTTPException(500, "Video upload failed (Cloudinary). Check logs.")
-    finally:
-        # remove tmp if exists (we'll remove again below but ensure)
-        pass
-
     public_id = res.get("public_id")
     url = res.get("secure_url")
     token = request.cookies.get("access_token")
@@ -306,17 +298,13 @@ def watch_video(request: Request, video_id: int, db: Session = Depends(get_db)):
     video = db.query(Video).filter(Video.id == video_id).first()
     if not video:
         raise HTTPException(404, "Not found")
-    # increment views (simple)
     try:
         video.views = (video.views or 0) + 1
         db.commit()
     except Exception:
         db.rollback()
-    thumb_url = None
-    if video.cloudinary_public_id and CLOUDINARY_OK:
-        thumb_url = make_thumb(video.cloudinary_public_id, width=640, height=360)
+    thumb_url = make_thumb(video.cloudinary_public_id, width=640, height=360) if video.cloudinary_public_id else (video.cloudinary_url or "/static/placeholder.jpg")
     comments = db.query(Comment).filter(Comment.video_id == video.id).order_by(Comment.created_at.asc()).all()
-    # pass user object
     return templates.TemplateResponse("watch.html", {"request": request, "video": video, "thumb_url": thumb_url, "comments": comments, "user": current_user(request, db)})
 
 @app.post("/watch/{video_id}/comment")
@@ -335,23 +323,16 @@ def search(request: Request, q: Optional[str] = None, db: Session = Depends(get_
     if q:
         pattern = f"%{q}%"
         videos = db.query(Video).filter((Video.title.ilike(pattern)) | (Video.description.ilike(pattern))).limit(50).all()
-    # convert to simpler objects for template if needed
     return templates.TemplateResponse("search.html", {"request": request, "videos": videos, "q": q, "user": current_user(request, db)})
 
 @app.post("/api/react")
 async def react_api(request: Request, target_type: str = Form(None), target_id: Optional[int] = Form(None), value: Optional[int] = Form(None), db: Session = Depends(get_db)):
-    """
-    Accepts both form-encoded (from templates) and JSON (from fetch).
-    JSON example: { "target_type":"video","target_id":2,"value":1 }
-    """
     data = {}
-    # If fields are missing in Form, try JSON body
     if not (target_type and target_id is not None and value is not None):
         try:
             data = await request.json()
         except Exception:
             data = {}
-        # overwrite if present
         target_type = target_type or data.get("target_type")
         target_id = target_id or data.get("target_id")
         value = value or data.get("value")
@@ -384,7 +365,7 @@ async def react_api(request: Request, target_type: str = Form(None), target_id: 
             db.commit()
             return JSONResponse({"status":"ok","likes":likes,"dislikes":dislikes})
     return JSONResponse({"status":"ok"})
-
+ 
 @app.get("/profile/{username}", response_class=HTMLResponse)
 def profile_page(request: Request, username: str, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.username == username).first()
