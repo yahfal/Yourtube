@@ -8,12 +8,12 @@ Environment variables required:
 import os
 import uuid
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, List, Dict
 from pathlib import Path
 from urllib.parse import urlparse, unquote
 
 from fastapi import FastAPI, Request, Form, UploadFile, File, Depends, HTTPException, status
-from fastapi.responses import RedirectResponse, HTMLResponse
+from fastapi.responses import RedirectResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, Text, ForeignKey, UniqueConstraint
@@ -68,7 +68,7 @@ MEDIA_DIR.mkdir(exist_ok=True, parents=True)
 # ------------------ DB setup ------------------
 engine = create_engine(
     DATABASE_URL,
-    connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {}
+    connect_args={"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
 )
 SessionLocal = sessionmaker(bind=engine)
 Base = declarative_base()
@@ -143,9 +143,13 @@ def hash_password(pw: str) -> str:
 def verify_password(pw: str, h: str) -> bool:
     return pbkdf2_sha256.verify(pw, h)
 
-def create_token(user_id: int):
+def create_token(user_id: int) -> str:
     payload = {"user_id": user_id, "exp": datetime.utcnow() + timedelta(days=7)}
-    return jwt.encode(payload, SECRET_KEY, algorithm="HS256")
+    token = jwt.encode(payload, SECRET_KEY, algorithm="HS256")
+    # PyJWT returns str with modern versions
+    if isinstance(token, bytes):
+        token = token.decode()
+    return token
 
 def decode_token(token: str):
     try:
@@ -163,11 +167,34 @@ def current_user(request: Request, db: Session = Depends(get_db)) -> Optional[Us
     user = db.query(User).filter(User.id == data.get("user_id")).first()
     return user
 
+# helpers for cloudinary thumbnails
+def make_thumb(public_id: str, width: int = 480, height: int = 360) -> Optional[str]:
+    if not CLOUDINARY_OK or not public_id:
+        return None
+    try:
+        from cloudinary.utils import cloudinary_url
+        url, _ = cloudinary_url(public_id, resource_type="video", format="jpg",
+                                transformation=[{"start_offset":"0","width":width,"height":height,"crop":"fill"}])
+        return url
+    except Exception:
+        return None
+
 # ------------------ Routes ------------------
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request, db: Session = Depends(get_db)):
-    videos = db.query(Video).order_by(Video.created_at.desc()).limit(30).all()
-    return templates.TemplateResponse("index.html", {"request": request, "videos": videos, "user": current_user(request, db)})
+    # show recommended by views desc first, but also include recent
+    videos = db.query(Video).order_by(Video.views.desc(), Video.created_at.desc()).limit(30).all()
+    # add thumb_url for rendering
+    video_list = []
+    for v in videos:
+        video_list.append({
+            "id": v.id,
+            "title": v.title,
+            "views": v.views,
+            "thumb_url": make_thumb(v.cloudinary_public_id, width=320, height=180) or v.cloudinary_url,
+            "uploader": v.uploader.username if v.uploader else None,
+        })
+    return templates.TemplateResponse("index.html", {"request": request, "videos": video_list, "user": current_user(request, db)})
 
 @app.get("/register", response_class=HTMLResponse)
 def register_page(request: Request):
@@ -219,22 +246,37 @@ def upload_video(request: Request, title: str = Form(...), description: str = Fo
     if not CLOUDINARY_OK:
         raise HTTPException(500, "Cloudinary is not configured correctly. Set CLOUDINARY_URL to 'cloudinary://API_KEY:API_SECRET@CLOUD_NAME'.")
     # save temporarily
-    tmp_name = f"/tmp/{uuid.uuid4().hex}_{file.filename}"
-    with open(tmp_name, "wb") as f:
-        f.write(file.file.read())
+    tmp_name = f"/tmp/{uuid.uuid4().hex}_{os.path.basename(file.filename)}"
+    try:
+        with open(tmp_name, "wb") as f:
+            f.write(file.file.read())
+    except Exception as e:
+        raise HTTPException(500, f"Failed to save upload: {e}")
     # upload to cloudinary as video
     try:
         res = cloudinary.uploader.upload(tmp_name, resource_type="video", folder="minitube_videos")
     except Exception as e:
         # attach minimal info to logs and return user-friendly error
         print("Cloudinary upload error:", str(e))
+        try:
+            os.remove(tmp_name)
+        except Exception:
+            pass
         raise HTTPException(500, "Video upload failed (Cloudinary). Check logs.")
+    finally:
+        # remove tmp if exists (we'll remove again below but ensure)
+        pass
+
     public_id = res.get("public_id")
     url = res.get("secure_url")
     token = request.cookies.get("access_token")
     data = decode_token(token) if token else None
     user_id = data.get("user_id") if data else None
     if not user_id:
+        try:
+            os.remove(tmp_name)
+        except Exception:
+            pass
         raise HTTPException(401, "Unauthorized")
     video = Video(title=title, description=description, cloudinary_public_id=public_id, cloudinary_url=url, uploader_id=user_id)
     db.add(video)
@@ -251,16 +293,17 @@ def watch_video(request: Request, video_id: int, db: Session = Depends(get_db)):
     video = db.query(Video).filter(Video.id == video_id).first()
     if not video:
         raise HTTPException(404, "Not found")
-    video.views += 1
-    db.commit()
+    # increment views (simple)
+    try:
+        video.views = (video.views or 0) + 1
+        db.commit()
+    except Exception:
+        db.rollback()
     thumb_url = None
     if video.cloudinary_public_id and CLOUDINARY_OK:
-        from cloudinary.utils import cloudinary_url
-        try:
-            thumb_url, _ = cloudinary_url(video.cloudinary_public_id, resource_type="video", format="jpg", transformation=[{"start_offset":"0","width":480,"height":360,"crop":"fill"}])
-        except Exception:
-            thumb_url = None
+        thumb_url = make_thumb(video.cloudinary_public_id, width=640, height=360)
     comments = db.query(Comment).filter(Comment.video_id == video.id).order_by(Comment.created_at.asc()).all()
+    # pass user object
     return templates.TemplateResponse("watch.html", {"request": request, "video": video, "thumb_url": thumb_url, "comments": comments, "user": current_user(request, db)})
 
 @app.post("/watch/{video_id}/comment")
@@ -279,21 +322,45 @@ def search(request: Request, q: Optional[str] = None, db: Session = Depends(get_
     if q:
         pattern = f"%{q}%"
         videos = db.query(Video).filter((Video.title.ilike(pattern)) | (Video.description.ilike(pattern))).limit(50).all()
+    # convert to simpler objects for template if needed
     return templates.TemplateResponse("search.html", {"request": request, "videos": videos, "q": q, "user": current_user(request, db)})
 
 @app.post("/api/react")
-def react_api(request: Request, target_type: str = Form(...), target_id: int = Form(...), value: int = Form(...), db: Session = Depends(get_db)):
+async def react_api(request: Request, target_type: str = Form(None), target_id: Optional[int] = Form(None), value: Optional[int] = Form(None), db: Session = Depends(get_db)):
+    """
+    Accepts both form-encoded (from templates) and JSON (from fetch).
+    JSON example: { "target_type":"video","target_id":2,"value":1 }
+    """
+    data = {}
+    # If fields are missing in Form, try JSON body
+    if not (target_type and target_id is not None and value is not None):
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+        # overwrite if present
+        target_type = target_type or data.get("target_type")
+        target_id = target_id or data.get("target_id")
+        value = value or data.get("value")
+
+    if not (target_type and target_id is not None and value is not None):
+        raise HTTPException(400, "Missing parameters")
+
     user = current_user(request, db)
     if not user:
         raise HTTPException(401, "Unauthorized")
+
     existing = db.query(Reaction).filter(Reaction.user_id == user.id, Reaction.target_type == target_type, Reaction.target_id == target_id).first()
     if existing and existing.value == value:
         db.delete(existing)
+        db.commit()
     elif existing and existing.value != value:
         existing.value = value
+        db.commit()
     else:
         db.add(Reaction(user_id=user.id, target_type=target_type, target_id=target_id, value=value))
-    db.commit()
+        db.commit()
+
     if target_type == "video":
         v = db.query(Video).filter(Video.id == target_id).first()
         if v:
@@ -302,7 +369,8 @@ def react_api(request: Request, target_type: str = Form(...), target_id: int = F
             v.likes = likes
             v.dislikes = dislikes
             db.commit()
-    return {"status":"ok"}
+            return JSONResponse({"status":"ok","likes":likes,"dislikes":dislikes})
+    return JSONResponse({"status":"ok"})
 
 @app.get("/profile/{username}", response_class=HTMLResponse)
 def profile_page(request: Request, username: str, db: Session = Depends(get_db)):
