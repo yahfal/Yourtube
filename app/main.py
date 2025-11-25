@@ -66,10 +66,23 @@ MEDIA_DIR = BASE_DIR / ".." / "media"
 MEDIA_DIR.mkdir(exist_ok=True, parents=True)
 
 # ------------------ DB setup ------------------
-engine = create_engine(
-    DATABASE_URL,
-    connect_args={"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
-)
+# Prefer psycopg v3 (psycopg) on modern Python; if installed, adjust URL scheme for SQLAlchemy.
+USE_PSYCOPG3 = False
+try:
+    import psycopg  # psycopg v3
+    USE_PSYCOPG3 = True
+except Exception:
+    USE_PSYCOPG3 = False
+
+_engine_url = DATABASE_URL or "sqlite:///./dev.db"
+
+# If psycopg v3 present and URL starts with postgres://, replace scheme so SQLAlchemy uses psycopg driver
+if USE_PSYCOPG3 and _engine_url.startswith("postgres://"):
+    _engine_url = _engine_url.replace("postgres://", "postgresql+psycopg://", 1)
+
+connect_args = {"check_same_thread": False} if _engine_url.startswith("sqlite") else {}
+
+engine = create_engine(_engine_url, connect_args=connect_args)
 SessionLocal = sessionmaker(bind=engine)
 Base = declarative_base()
 
@@ -121,6 +134,7 @@ class Reaction(Base):
     value = Column(Integer, nullable=False)
     __table_args__ = (UniqueConstraint('user_id', 'target_type', 'target_id', name='_user_target_uc'),)
 
+# Create tables if they don't exist
 Base.metadata.create_all(bind=engine)
 
 # ------------------ FastAPI app ------------------
@@ -146,7 +160,6 @@ def verify_password(pw: str, h: str) -> bool:
 def create_token(user_id: int) -> str:
     payload = {"user_id": user_id, "exp": datetime.utcnow() + timedelta(days=7)}
     token = jwt.encode(payload, SECRET_KEY, algorithm="HS256")
-    # PyJWT returns str with modern versions
     if isinstance(token, bytes):
         token = token.decode()
     return token
