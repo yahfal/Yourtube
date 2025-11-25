@@ -1,19 +1,37 @@
-{% extends "base.html" %}
-{% block content %}
-<h3>Latest videos</h3>
-<div class="row">
-  {% for v in videos %}
-  <div class="col-md-4 mb-3">
-    <div class="card">
-      <img src="{{ v.cloudinary_url }}" class="card-img-top" />
-      <div class="card-body">
-        <h5 class="card-title">{{ v.title or "(no title)" }}</h5>
-        <p class="card-text">{{ v.description[:120] }}</p>
-        <p class="mb-1"><small>By {{ v.uploader.username }}</small></p>
-        <a class="btn btn-sm btn-primary" href="/watch/{{ v.id }}">Watch</a>
-      </div>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>YourTube — Главная</title>
+  <link rel="stylesheet" href="{{ url_for('static', path='/styles.css') }}">
+</head>
+<body>
+  <header>
+    <h1><a href="/">YourTube</a></h1>
+    {% if user %}
+      <a href="/profile/{{ user.username }}">Профиль</a> | <a href="/logout">Выйти</a>
+    {% else %}
+      <a href="/login">Войти</a> | <a href="/register">Регистрация</a>
+    {% endif %}
+    <a href="/upload">Загрузить видео</a>
+  </header>
+
+  <main>
+    <h2>Рекомендовано</h2>
+    <div class="video-grid">
+      {% for video in videos %}
+        <div class="video-card">
+          {% if video.cloudinary_public_id %}
+            <a href="/watch/{{ video.id }}">
+              <img src="{{ url_for('static', path='/placeholder.jpg') }}" alt="превью" class="thumb" />
+              {# Можно заменить на Cloudinary-превью, если передаёшь thumb_url #}
+            </a>
+          {% endif %}
+          <h3><a href="/watch/{{ video.id }}">{{ video.title }}</a></h3>
+          <p>Просмотры: {{ video.views }}</p>
+        </div>
+      {% endfor %}
     </div>
-  </div>
-  {% endfor %}
-</div>
-{% endblock %}
+  </main>
+</body>
+</html>
